@@ -16,7 +16,7 @@ pub use completion_chunk::CompletionChunk;
 pub use completion_request::CompletionRequest;
 pub use context_file::ContextFile;
 use futures::Stream;
-pub use provider_configuration::{ClaudeConfig, ProviderConfig};
+pub use provider_configuration::ProviderConfig;
 pub use provider_error::ProviderError;
 pub use provider_registry::ProviderRegistry;
 use std::pin::Pin;

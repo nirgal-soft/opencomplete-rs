@@ -1,4 +1,4 @@
-//! nvim-supercomplete - AI-powered code completion agent for Neovim
+//! opencomplete - AI-powered code completion agent for Neovim
 //!
 //! A local daemon that provides streaming code completions to a Neovim plugin.
 //! Supports Claude (via API key) and Ollama (local models).
@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
-#[command(name = "nvim-supercomplete")]
+#[command(name = "opencomplete")]
 #[command(about = "AI-powered code completion agent for Neovim")]
 struct Cli {
     #[command(subcommand)]
@@ -63,8 +63,7 @@ async fn main() -> anyhow::Result<()> {
     let log_level = if cli.debug { "debug" } else { "info" };
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| format!("nvim_supercomplete={}", log_level)),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| format!("opencomplete={}", log_level)),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -102,6 +101,7 @@ async fn serve(port_override: Option<u16>) -> anyhow::Result<()> {
                     }
                 }
             }
+
             ProviderConfig::Ollama(ollama_config) => {
                 let provider = OllamaProvider::new(ollama_config.clone());
                 tracing::info!("Loaded Ollama provider (model: {})", ollama_config.model);
@@ -131,10 +131,9 @@ async fn serve(port_override: Option<u16>) -> anyhow::Result<()> {
 fn handle_config(action: ConfigAction) -> anyhow::Result<()> {
     match action {
         ConfigAction::Path => {
-            let dirs =
-                directories::ProjectDirs::from("com", "nvim-supercomplete", "nvim-supercomplete")
-                    .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
-            println!("{}", dirs.config_dir().join("config.toml").display());
+            let home = std::env::var("HOME")
+                .map_err(|_| anyhow::anyhow!("Could not determine home directory"))?;
+            println!("{}/.config/opencomplete/config.toml", home);
         }
         ConfigAction::Example => {
             println!("{}", config::example_config());

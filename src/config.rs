@@ -1,10 +1,11 @@
 //! Configuration management
 //!
 //! Loads and manages configuration from:
-//! - Config file (~/.config/nvim-supercomplete/config.toml)
+//! - Config file (~/.config/opencomplete/config.toml)
 //! - Environment variables (ANTHROPIC_API_KEY)
 
-use crate::providers::{ClaudeConfig, ProviderConfig};
+use crate::providers::ProviderConfig;
+use crate::providers::provider_configuration::{ClaudeConfig, OllamaConfig};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -60,10 +61,16 @@ impl Default for Config {
         Self {
             server: ServerConfig::default(),
             default_provider: Some("claude".to_string()),
-            providers: vec![ProviderConfig::Claude(ClaudeConfig {
-                model: "claude-sonnet-4-20250514".to_string(),
-                api_key: None, // Will use ANTHROPIC_API_KEY env var
-            })],
+            providers: vec![
+                ProviderConfig::Claude(ClaudeConfig {
+                    model: "claude-sonnet-4-20250514".to_string(),
+                    api_key: None, // Uses ANTHROPIC_API_KEY env var
+                }),
+                ProviderConfig::Ollama(OllamaConfig {
+                    model: "qwen2.5-coder:latest".to_string(),
+                    base_url: "http://localhost:11434".to_string(),
+                }),
+            ],
         }
     }
 }
@@ -105,11 +112,10 @@ impl Config {
 
     /// Get the default config path
     fn default_path() -> anyhow::Result<PathBuf> {
-        let dirs =
-            directories::ProjectDirs::from("com", "nvim-supercomplete", "nvim-supercomplete")
-                .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
+        let home = std::env::var("HOME")
+            .map_err(|_| anyhow::anyhow!("Could not determine home directory"))?;
 
-        Ok(dirs.config_dir().join("config.toml"))
+        Ok(PathBuf::from(home).join(".config/opencomplete/config.toml"))
     }
 }
 
@@ -119,28 +125,27 @@ impl Config {
 
 /// Generate an example config file
 pub fn example_config() -> String {
-    r#"# nvim-supercomplete configuration
+    r#"# opencomplete configuration
 
 [server]
 port = 8642
 host = "127.0.0.1"
 
 # Default provider to use
-default_provider = "claude"
-
-# Claude provider (API key)
-# Set ANTHROPIC_API_KEY env var, or uncomment api_key below
-[[providers]]
-type = "claude"
-model = "claude-sonnet-4-20250514"
-# api_key = "sk-ant-..."  # Or use ANTHROPIC_API_KEY env var
+default_provider = "ollama"
 
 # Ollama provider (local models - free!)
+[[providers]]
+type = "ollama"
+model = "qwen3-coder:latest"
+base_url = "http://localhost:11434"
+
+# Claude API provider (requires API key)
 # Uncomment to enable:
 # [[providers]]
-# type = "ollama"
-# model = "qwen2.5-coder:7b"
-# base_url = "http://localhost:11434"
+# type = "claude"
+# model = "claude-sonnet-4-20250514"
+# api_key = "sk-ant-..."  # Or use ANTHROPIC_API_KEY env var
 "#
     .to_string()
 }

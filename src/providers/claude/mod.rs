@@ -10,7 +10,6 @@ use crate::providers::{
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -18,6 +17,25 @@ use serde::{Deserialize, Serialize};
 // ─────────────────────────────────────────────────────────────────────────────
 
 const API_BASE: &str = "https://api.anthropic.com/v1";
+
+const BASE_SYSTEM_PROMPT: &str = r#"You are a code completion assistant. Complete the code at the cursor position marked by <CURSOR>.
+
+If the cursor follows a comment describing code, start your completion with a newline.
+
+CRITICAL: Output ONLY raw code. Do NOT wrap in markdown code fences (```). No explanations. Just the code to insert."#;
+
+/// Build system prompt, optionally including style hints
+fn build_system_prompt(style_hints: Option<&str>) -> String {
+    match style_hints {
+        Some(hints) if !hints.trim().is_empty() => {
+            format!(
+                "{}\n\nCode style conventions to follow:\n{}",
+                BASE_SYSTEM_PROMPT, hints
+            )
+        }
+        _ => BASE_SYSTEM_PROMPT.to_string(),
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request/Response Types (Anthropic API format)
@@ -41,72 +59,19 @@ struct Message {
     content: String,
 }
 
-/// streaming event from Anthropic API
+/// Non-streaming response from Anthropic API
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum StreamEvent {
-    MessageStart {
-        #[allow(dead_code)]
-        message: MessageStart,
-    },
-    ContentBlockStart {
-        #[allow(dead_code)]
-        index: u32,
-        #[allow(dead_code)]
-        content_block: ContentBlock,
-    },
-    ContentBlockDelta {
-        #[allow(dead_code)]
-        index: u32,
-        delta: ContentDelta,
-    },
-    ContentBlockStop {
-        #[allow(dead_code)]
-        index: u32,
-    },
-    MessageDelta {
-        delta: MessageDeltaContent,
-    },
-    MessageStop,
-    Ping,
-    Error {
-        error: ApiError,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct MessageStart {
-    id: String,
-    model: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ContentBlock {
-    #[serde(rename = "type")]
-    content_type: String,
-    text: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContentDelta {
-    #[serde(rename = "type")]
-    #[allow(dead_code)]
-    delta_type: String,
-    text: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MessageDeltaContent {
+struct MessagesResponse {
+    content: Vec<ContentBlock>,
     stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ApiError {
+struct ContentBlock {
     #[serde(rename = "type")]
-    _error_type: String,
-    message: String,
+    #[allow(dead_code)]
+    content_type: String,
+    text: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,36 +109,38 @@ impl ClaudeProvider {
     /// Build the prompt for code completion
     fn build_prompt(request: &CompletionRequest) -> String {
         format!(
-      "You are an expert code completion assistant. Complete the code at <CURSOR>.
-
-Language: {}
-{}
-
-Code context:
-```
-{}
-<CURSOR>
-{}
-```
-
-Provide ONLY the code that should replace <CURSOR>. Do not include markdown, explanations, or the surrounding code. Output raw code only.",
-      request.language,
-      request.file_path.as_deref().map(|p| format!("File: {}", p)).unwrap_or_default(),
-      request.prefix,
-      request.suffix
-    )
+            "Complete the following {} code at <CURSOR>:\n\n{}<CURSOR>{}",
+            request.language, request.prefix, request.suffix
+        )
     }
 
-    /// parse sse stream
-    fn parse_sse_line(line: &str) -> Option<StreamEvent> {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if data == "[DONE]" {
-                return None;
-            }
-            serde_json::from_str(data).ok()
-        } else {
-            None
+    /// Strip markdown code fences from model output
+    /// Models sometimes wrap code in ```language ... ``` despite instructions not to
+    fn strip_markdown_fences(text: &str) -> String {
+        let trimmed = text.trim();
+
+        // Check if wrapped in code fences
+        if !trimmed.starts_with("```") {
+            return text.to_string();
         }
+
+        // Find the end of the opening fence (first newline after ```)
+        let after_opening = if let Some(newline_pos) = trimmed.find('\n') {
+            &trimmed[newline_pos + 1..]
+        } else {
+            // No newline found, return as-is
+            return text.to_string();
+        };
+
+        // Check for and strip closing fence
+        let content = if after_opening.trim_end().ends_with("```") {
+            let end_pos = after_opening.rfind("```").unwrap();
+            &after_opening[..end_pos]
+        } else {
+            after_opening
+        };
+
+        content.to_string()
     }
 }
 
@@ -222,21 +189,19 @@ impl CompletionProvider for ClaudeProvider {
         request: CompletionRequest,
     ) -> Result<CompletionStream, ProviderError> {
         let prompt = Self::build_prompt(&request);
+        let system_prompt = build_system_prompt(request.style_hints.as_deref());
 
         let api_request = MessagesRequest {
-      model: self.config.model.clone(),
-      max_tokens: request.max_tokens,
-      stream: true,
-      messages: vec![Message {
-        role: "user".to_string(),
-        content: prompt,
-      }],
-      system: Some(
-        "You are a code completion assistant. Output only raw code, no markdown or explanations."
-          .to_string(),
-      ),
-      stop_sequences: request.stop,
-    };
+            model: self.config.model.clone(),
+            max_tokens: request.max_tokens,
+            stream: false,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: prompt,
+            }],
+            system: Some(system_prompt),
+            stop_sequences: request.stop,
+        };
 
         let response = self
             .client
@@ -261,66 +226,32 @@ impl CompletionProvider for ClaudeProvider {
             });
         }
 
-        let byte_stream = response.bytes_stream();
+        let messages_response: MessagesResponse = response.json().await?;
+
+        // Extract text from content blocks
+        let raw_text = messages_response
+            .content
+            .into_iter()
+            .filter_map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join("");
+
+        // Strip markdown fences if the model added them despite instructions
+        let text = Self::strip_markdown_fences(&raw_text);
+
+        let finish_reason = match messages_response.stop_reason.as_deref() {
+            Some("end_turn") => FinishReason::Stop,
+            Some("max_tokens") => FinishReason::Length,
+            Some("stop_sequence") => FinishReason::StopSequence,
+            _ => FinishReason::Stop,
+        };
 
         let stream = try_stream! {
-          let mut buffer = String::new();
-
-          futures::pin_mut!(byte_stream);
-
-          while let Some(chunk_result) = byte_stream.next().await {
-            let chunk = chunk_result?;
-            let text = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&text);
-
-            while let Some(newline_pos) = buffer.find('\n') {
-              let line = buffer[..newline_pos].trim().to_string();
-              buffer = buffer[newline_pos + 1..].to_string();
-
-              if line.is_empty() {
-                continue;
-              }
-
-              if let Some(event) = Self::parse_sse_line(&line) {
-                match event {
-                  StreamEvent::ContentBlockDelta { delta, .. } => {
-                    if let Some(text) = delta.text {
-                      yield CompletionChunk {
-                        text,
-                        is_final: false,
-                        finish_reason: None,
-                      };
-                    }
-                  }
-                  StreamEvent::MessageDelta { delta } => {
-                    if let Some(reason) = delta.stop_reason {
-                      yield CompletionChunk {
-                        text: String::new(),
-                        is_final: true,
-                        finish_reason: Some(match reason.as_str() {
-                          "end_turn" => FinishReason::Stop,
-                          "max_tokens" => FinishReason::Length,
-                          "stop_sequence" => FinishReason::StopSequence,
-                          _ => FinishReason::Stop,
-                        }),
-                      };
-                    }
-                  }
-                  StreamEvent::MessageStop => {
-                    yield CompletionChunk {
-                      text: String::new(),
-                      is_final: true,
-                      finish_reason: Some(FinishReason::Stop),
-                    };
-                  }
-                  StreamEvent::Error { error } => {
-                    Err(ProviderError::ProviderResponse(error.message))?;
-                  }
-                  _ => {}
-                }
-              }
-            }
-          }
+            yield CompletionChunk {
+                text,
+                is_final: true,
+                finish_reason: Some(finish_reason),
+            };
         };
 
         Ok(Box::pin(stream))
